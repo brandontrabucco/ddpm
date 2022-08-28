@@ -32,7 +32,7 @@ class ResidualLayer(nn.Module):
         shift = shift.view(*x.shape[:2], 1, 1)
 
         return x + self.feedforward(
-            self.norm(x) * (scale + 1) + shift)
+            self.norm(x)) * (scale + 1) + shift
     
 
 class ResidualBlock(nn.Module):
