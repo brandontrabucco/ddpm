@@ -2,6 +2,89 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from typing import Tuple
+
+
+class ResidualLayer(nn.Module):
+    
+    def __init__(self, dim: int, 
+                 embed_dim: int,
+                 inner_dim: int = 384, 
+                 groups: int = 1,
+                 dropout: float = 0.0):
+        
+        super(ResidualLayer, self).__init__()
+        
+        self.norm = nn.GroupNorm(groups, dim)
+        self.embed_to_param = nn.Linear(embed_dim, 2 * dim)
+        
+        self.feedforward = nn.Sequential(
+            nn.Conv2d(dim, inner_dim, 3, padding=1),
+            nn.GELU(), 
+            nn.Dropout2d(p=dropout),
+            nn.Conv2d(inner_dim, dim, 3, padding=1),
+            nn.Dropout2d(p=dropout))
+        
+    def forward(self, x, embed):
+
+        scale, shift = self.embed_to_param(embed).chunk(2, dim=1)
+        scale = scale.view(*x.shape[:2], 1, 1)
+        shift = shift.view(*x.shape[:2], 1, 1)
+
+        return x + self.feedforward(
+            self.norm(x) * (scale + 1) + shift)
+    
+
+class ResidualBlock(nn.Module):
+    
+    def __init__(self, *args, **kwargs):
+        
+        super(ResidualBlock, self).__init__()
+        
+        self.layer1 = ResidualLayer(*args, **kwargs)
+        self.layer2 = ResidualLayer(*args, **kwargs)
+        self.layer3 = ResidualLayer(*args, **kwargs)
+        
+    def forward(self, x, embed):
+        
+        x = self.layer1(x, embed)
+        x = self.layer2(x, embed)
+        return self.layer3(x, embed)
+    
+
+class UNetBlock(nn.Module):
+    
+    def __init__(self, *args, inner_module: 
+                 nn.Module = None, **kwargs):
+        
+        super(UNetBlock, self).__init__()
+        
+        self.downsample = nn.PixelUnshuffle(2)
+        self.upsample = nn.PixelShuffle(2)
+        
+        self.downsample_module = \
+            ResidualBlock(*args, **kwargs)
+        
+        self.upsample_module = \
+            ResidualBlock(*args, **kwargs)
+        
+        self.inner_module = inner_module
+        
+    def forward(self, x, embed):
+        
+        x = self.downsample_module(x, embed)
+        x0, x1 = torch.chunk(x, 2, dim=1)
+
+        x0 = self.downsample(x0)
+
+        if self.inner_module is not None:
+            x0 = self.inner_module(x0, embed)
+
+        x0 = self.upsample(x0)
+
+        x = torch.cat((x0, x1), dim=1)
+        return self.upsample_module(x, embed)
+
 
 def positional_encoding(coords, start, num_octaves):
 
@@ -22,121 +105,62 @@ def positional_encoding(coords, start, num_octaves):
                       torch.cos(scaled_coords)), dim=-1)
 
 
-class Residual(nn.Module):
-    
-    def __init__(self, dim: int, 
-                 dim_feedforward: int = 32, 
-                 dropout: float = 0.1):
-        
-        super(Residual, self).__init__()
-        
-        self.norm = nn.GroupNorm(1, dim)
-        
-        self.feedforward = nn.Sequential(
-            nn.Conv2d(dim + 24, dim_feedforward, 3, padding=1),
-            nn.GELU(), 
-            nn.Dropout2d(p=dropout),
-            nn.Conv2d(dim_feedforward, dim, 3, padding=1),
-            nn.Dropout2d(p=dropout),
-        )
-        
-    def forward(self, x, timestep):
-        
-        pos = positional_encoding(timestep.float(), -11, 12)
-        pos = pos.view(x.shape[0], 24, 1, 1)
-        pos = pos.expand(x.shape[0], 24, *x.shape[2:])
-        
-        return x + self.feedforward(
-            torch.cat((self.norm(x), pos), dim=1))
-    
+class PositionalEncoding(nn.Module):
 
-class ResidualBlock(nn.Module):
-    
-    def __init__(self, dim: int, **kwargs):
+    def __init__(self, start: int, num_octaves: int):
         
-        super(ResidualBlock, self).__init__()
-        
-        self.layer1 = Residual(dim, **kwargs)
-        self.layer2 = Residual(dim, **kwargs)
-        self.layer3 = Residual(dim, **kwargs)
-        
-    def forward(self, x, timestep):
-        
-        x = self.layer1(x, timestep)
-        x = self.layer2(x, timestep)
-        return self.layer3(x, timestep)
-    
+        super(PositionalEncoding, self).__init__()
 
-class UNetBlock(nn.Module):
-    
-    def __init__(self, dim: int, 
-                 dim_feedforward: int = 32, 
-                 dropout: float = 0.1, 
-                 inner_block: nn.Module = None):
-        
-        super(UNetBlock, self).__init__()
-        
-        self.downsample = nn.PixelUnshuffle(2)
-        self.upsample = nn.PixelShuffle(2)
-        
-        self.downsample_module = ResidualBlock(
-            dim, dim_feedforward=
-            dim_feedforward, dropout=dropout)
-        
-        self.upsample_module = ResidualBlock(
-            dim, dim_feedforward=
-            dim_feedforward, dropout=dropout)
-        
-        self.inner_block = inner_block
-        
-    def forward(self, x, timestep):
-        
-        x = self.downsample_module(x, timestep)
-        x0, x1 = torch.chunk(x, 2, dim=1)
-        
-        x0 = self.downsample(x0)
-        
-        if self.inner_block is not None:
-            x0 = self.inner_block(x0, timestep)
-            
-        x0 = self.upsample(x0)
-        
-        x = torch.cat((x0, x1), dim=1)
-        return self.upsample_module(x, timestep)
+        self.start = start
+        self.num_octaves = num_octaves
+
+    def forward(self, x):
+
+        return positional_encoding(
+            x, self.start, self.num_octaves)
 
 
 class DiffusionModel(nn.Module):
     
-    def __init__(self, dim: int = 192, 
-                 dim_feedforward: int = 384, 
-                 dropout: float = 0.1,
+    def __init__(self, base_dim: int = 192, 
+                 base_inner_dim: int = 384, 
+                 embed_dim: int = 384, 
+                 embed_start_octave: int = -1, 
+                 embed_num_octaves: int = 12, 
+                 dropout: float = 0.0,
                  num_resolutions: int = 3):
         
         super(DiffusionModel, self).__init__()
-        num_resolutions -= 1
+
+        self.timestep_embed = nn.Sequential(
+            PositionalEncoding(embed_start_octave, embed_num_octaves),
+            nn.Linear(embed_num_octaves * 2, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU())
         
-        self.conv1 = nn.Conv2d(3, dim, 1)
-        self.conv2 = nn.Conv2d(dim, 3, 1)
+        self.conv1 = nn.Conv2d(3, base_dim, 1)
+        self.conv2 = nn.Conv2d(base_dim, 3, 1)
+
+        dim_mults = [2 ** n for n in range(
+            num_resolutions - 1, -1, -1)]
         
         self.unet = ResidualBlock(
-            dim * 2 ** num_resolutions, 
-            dim_feedforward=
-            dim_feedforward * 2 ** num_resolutions,
-            dropout=dropout
-        )
+            base_dim * dim_mults[0], embed_dim,
+            inner_dim=base_inner_dim * dim_mults[0],
+            groups=dim_mults[0],
+            dropout=dropout)
         
-        for layer in reversed(
-                range(num_resolutions)):
+        for multx in dim_mults[1:]:
             
             self.unet = UNetBlock(
-                dim * 2 ** layer, 
-                dim_feedforward=
-                dim_feedforward * 2 ** layer,
+                base_dim * multx, embed_dim,
+                inner_dim=base_inner_dim * multx,
+                groups=multx,
                 dropout=dropout,
-                inner_block=self.unet
-            )
+                inner_module=self.unet)
         
     def forward(self, x, timestep):
-        
-        return self.conv2(
-            self.unet(self.conv1(x), timestep))
+
+        embed = self.timestep_embed(timestep)
+        return self.conv2(self.unet(self.conv1(x), embed))

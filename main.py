@@ -66,14 +66,13 @@ if __name__ == "__main__":
 
     unwrapped_model = model = DiffusionModel().to(device)
 
+    print(model)
+
     if world_size > 1:
         model = nn.parallel.DistributedDataParallel(
             model, device_ids=[rank], output_device=rank)
 
     optim = torch.optim.Adam(model.parameters(), lr=0.0001)
-
-    alphas = 1.0 - torch.linspace(1e-4, 0.02, 1000).to(device)
-    alphas_tilde = alphas.cumprod(dim=0)
 
     model.train()
 
@@ -91,13 +90,13 @@ if __name__ == "__main__":
             images = images.to(device)
             noise = torch.randn_like(images)
 
-            timestep = torch.randint(
-                alphas.shape[0], [images.shape[0]]).to(device)
-            alphas_tilde_batch = alphas_tilde[
-                timestep].view(images.shape[0], 1, 1, 1)
+            timestep = torch.rand(images.shape[0], device=device)
 
-            images = (torch.sqrt(alphas_tilde_batch) * images + 
-                      torch.sqrt(1 - alphas_tilde_batch) * noise)
+            alphas = torch.cos(timestep * 3.1415927410125732 / 2) ** 2
+            alphas = alphas.view(images.shape[0], 1, 1, 1)
+
+            images = (torch.sqrt(alphas) * images + 
+                      torch.sqrt(1 - alphas) * noise)
 
             pred = model(images, timestep)
             loss = ((noise - pred) ** 2).mean()
@@ -117,6 +116,6 @@ if __name__ == "__main__":
         print(f"Epoch {epoch} Iteration {iteration} " + 
               f"Training Loss {epoch_loss / epoch_size}")
 
-    if rank == 0:
-        torch.save(dict(model=unwrapped_model, iteration=iteration), 
-                   os.path.join(args.logdir, f"model-{iteration}.pt"))
+        if rank == 0:
+            torch.save(dict(model=unwrapped_model, iteration=iteration), 
+                    os.path.join(args.logdir, f"model-{iteration}.pt"))
