@@ -57,12 +57,12 @@ if __name__ == "__main__":
     sampler = None
 
     if world_size > 1:
-        sampler = distributed.DistributedSampler(
+        sampler = torch.utils.data.distributed.DistributedSampler(
             dataset, shuffle=True, drop_last=False)
 
     data_loader = torch.utils.data.DataLoader(
         dataset, batch_size=args.batch_size, num_workers=4, 
-        pin_memory=True, sampler=sampler, shuffle=True)
+        pin_memory=True, sampler=sampler, shuffle=world_size == 1)
 
     unwrapped_model = model = DiffusionModel().to(device)
 
@@ -117,5 +117,6 @@ if __name__ == "__main__":
         print(f"Epoch {epoch} Iteration {iteration} " + 
               f"Training Loss {epoch_loss / epoch_size}")
 
+    if rank == 0:
         torch.save(dict(model=unwrapped_model, iteration=iteration), 
                    os.path.join(args.logdir, f"model-{iteration}.pt"))
